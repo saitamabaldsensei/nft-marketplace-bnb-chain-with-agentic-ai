@@ -1,0 +1,191 @@
+
+ // SPDX-License-Identifier: MIT
+pragma solidity ^0.8.24;
+
+/// @notice Minimal ERC721 interface for the marketplace.
+interface IERC721Minimal {
+    function ownerOf(uint256 tokenId)
+        external view returns (address);
+
+    function transferFrom(
+        address from,
+        address to,
+        uint256 tokenId
+    ) external;
+}
+
+contract AgenticNFTMarketplace {
+    address public owner;
+    address public aiAgent;
+
+    uint256 private unlocked = 1;
+
+    struct Listing {
+        address seller;
+        address nftContract;
+        uint256 tokenId;
+        uint256 price;
+        bool active;
+    }
+
+    uint256 public nextListingId = 1;
+
+    mapping(uint256 => Listing) public listings;
+    mapping(uint256 => uint256) public aiSuggestedPrice;
+
+    event NFTListed(
+        uint256 indexed listingId,
+        address indexed seller,
+        address nftContract,
+        uint256 tokenId,
+        uint256 price
+    );
+
+    event NFTSold(
+        uint256 indexed listingId,
+        address indexed buyer,
+        uint256 price
+    );
+
+    event AIPriceSuggested(
+        uint256 indexed listingId,
+        uint256 suggestedPrice,
+        string reason
+    );
+
+    event AIAgentUpdated(address indexed newAgent);
+
+    modifier onlyOwner() {
+        require(msg.sender == owner, "Not owner");
+        _;
+    }
+
+    modifier onlyAgent() {
+        require(msg.sender == aiAgent, "Not AI agent");
+        _;
+    }
+
+    modifier nonReentrant() {
+        require(unlocked == 1, "Reentrant call");
+        unlocked = 2;
+        _;
+        unlocked = 1;
+    }
+
+    constructor(address _aiAgent) {
+        owner = msg.sender;
+        aiAgent = _aiAgent;
+    }
+
+    /// @notice List an approved NFT for sale.
+    function listNFT(
+        address nftContract,
+        uint256 tokenId,
+        uint256 price
+    ) external returns (uint256 listingId) {
+        require(nftContract != address(0), "Invalid NFT");
+        require(price > 0, "Price must be positive");
+
+        IERC721Minimal nft = IERC721Minimal(nftContract);
+
+        require(
+            nft.ownerOf(tokenId) == msg.sender,
+            "Not NFT owner"
+        );
+
+        listingId = nextListingId++;
+
+        listings[listingId] = Listing({
+            seller: msg.sender,
+            nftContract: nftContract,
+            tokenId: tokenId,
+            price: price,
+            active: true
+        });
+
+        emit NFTListed(
+            listingId,
+            msg.sender,
+            nftContract,
+            tokenId,
+            price
+        );
+    }
+
+    /// @notice Buy an NFT using native BNB.
+    function buyNFT(uint256 listingId)
+        external
+        payable
+        nonReentrant
+    {
+        Listing storage item = listings[listingId];
+
+        require(item.active, "Listing inactive");
+        require(msg.value == item.price, "Incorrect BNB amount");
+        require(msg.sender != item.seller, "Cannot buy own NFT");
+
+        address seller = item.seller;
+        address nftContract = item.nftContract;
+        uint256 tokenId = item.tokenId;
+        uint256 price = item.price;
+
+        item.active = false;
+
+        // Transfer NFT to buyer.
+        IERC721Minimal(nftContract).transferFrom(
+            seller,
+            msg.sender,
+            tokenId
+        );
+
+        // Pay seller.
+        (bool success, ) = payable(seller).call{value: price}("");
+        require(success, "Payment failed");
+
+        emit NFTSold(listingId, msg.sender, price);
+    }
+
+    /// @notice Cancel an active listing.
+    function cancelListing(uint256 listingId) external {
+        Listing storage item = listings[listingId];
+
+        require(item.active, "Listing inactive");
+        require(item.seller == msg.sender, "Not seller");
+
+        item.active = false;
+    }
+
+    /// @notice Authorized AI agent publishes a price recommendation.
+    /// The AI cannot change the listing price or move user funds.
+    function suggestPrice(
+        uint256 listingId,
+        uint256 suggestedPrice,
+        string calldata reason
+    ) external onlyAgent {
+        require(listings[listingId].active, "Listing inactive");
+        require(suggestedPrice > 0, "Invalid suggested price");
+
+        aiSuggestedPrice[listingId] = suggestedPrice;
+
+        emit AIPriceSuggested(
+            listingId,
+            suggestedPrice,
+            reason
+        );
+    }
+
+    /// @notice Update the authorized AI agent.
+    function setAIAgent(address newAgent) external onlyOwner {
+        require(newAgent != address(0), "Invalid agent");
+
+        aiAgent = newAgent;
+        emit AIAgentUpdated(newAgent);
+    }
+
+    /// @notice Withdraw accidental BNB transfers.
+    function withdraw() external onlyOwner nonReentrant {
+        uint256 balance = address(this).balance;
+        (bool success, ) = payable(owner).call{value: balance}("");
+        require(success, "Withdrawal failed");
+    }
+}
